@@ -2,8 +2,12 @@ package com.example.bookingservice.service;
 
 import com.example.bookingservice.entity.Booking;
 import com.example.bookingservice.entity.RoomLock;
+import com.example.bookingservice.lock.DistributedRoomLock;
+import com.example.bookingservice.realtime.BookingUpdatePublisher;
 import com.example.bookingservice.repository.BookingRepository;
 import com.example.bookingservice.repository.RoomLockRepository;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.redisson.api.RLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -15,6 +19,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 @Service
@@ -28,13 +33,22 @@ public class BookingService {
 
     private final BookingRepository bookingRepository;
     private final RoomLockRepository roomLockRepository;
+    private final DistributedRoomLock distributedRoomLock;
+    private final BookingUpdatePublisher updatePublisher;
+    private final MeterRegistry meterRegistry;
     private final TransactionTemplate tx;
 
     public BookingService(BookingRepository bookingRepository,
                           RoomLockRepository roomLockRepository,
+                          DistributedRoomLock distributedRoomLock,
+                          BookingUpdatePublisher updatePublisher,
+                          MeterRegistry meterRegistry,
                           PlatformTransactionManager transactionManager) {
         this.bookingRepository = bookingRepository;
         this.roomLockRepository = roomLockRepository;
+        this.distributedRoomLock = distributedRoomLock;
+        this.updatePublisher = updatePublisher;
+        this.meterRegistry = meterRegistry;
         this.tx = new TransactionTemplate(transactionManager);
     }
 
@@ -48,32 +62,51 @@ public class BookingService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ngày check-out phải sau ngày check-in");
         }
 
-        ensureLockRow(roomId);
+        // 1. Khoá phân tán Redis, dùng chung cho mọi instance. Redis lỗi → Optional.empty()
+        Optional<RLock> redisLock = distributedRoomLock.acquire(roomId);
+        boolean useDatabaseLock = redisLock.isEmpty();
+        if (useDatabaseLock) {
+            ensureLockRow(roomId);
+        }
 
-        return tx.execute(status -> {
-            // 1. Khoá phòng: request khác đặt cùng phòng sẽ chờ ở đây tới khi transaction này xong
-            roomLockRepository.lockByRoomId(roomId)
-                    .orElseThrow(() -> new IllegalStateException("Thiếu dòng khoá cho phòng " + roomId));
-
-            // 2. Đang giữ khoá nên kết quả kiểm tra không thể bị request khác làm sai lệch
-            if (bookingRepository.existsOverlap(roomId, checkIn, checkOut, HOLDING_STATUSES)) {
-                log.info("Từ chối đặt phòng {} ({} → {}) cho {}: trùng lịch", roomId, checkIn, checkOut, userEmail);
-                throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        "Phòng đã có người đặt trong khoảng ngày này");
-            }
-
-            // 3. Ghi booking rồi commit, khoá được nhả
-            Booking booking = new Booking();
-            booking.setRoomId(roomId);
-            booking.setCheckIn(checkIn);
-            booking.setCheckOut(checkOut);
-            booking.setUserEmail(userEmail);
-            booking.setStatus(Booking.PENDING_PAYMENT);
-            return bookingRepository.save(booking);
-        });
+        try {
+            Booking created = tx.execute(status -> {
+                if (useDatabaseLock) {
+                    // 1b. Dự phòng khi Redis lỗi: khoá dòng của phòng trong PostgreSQL (SELECT ... FOR UPDATE)
+                    roomLockRepository.lockByRoomId(roomId)
+                            .orElseThrow(() -> new IllegalStateException("Thiếu dòng khoá cho phòng " + roomId));
+                    meterRegistry.counter("booking.room.lock", "type", "database").increment();
+                }
+                return insertIfFree(roomId, checkIn, checkOut, userEmail);
+            });
+            updatePublisher.publish(created);
+            return created;
+        } finally {
+            // 4. Nhả khoá Redis SAU khi transaction đã commit
+            redisLock.ifPresent(distributedRoomLock::release);
+        }
     }
 
-    /** Tạo dòng khoá cho phòng nếu chưa có. Hai request cùng tạo thì một bên lỗi khoá chính, bỏ qua được. */
+    /** Chỉ gọi khi đang giữ khoá phòng (Redis hoặc database). */
+    private Booking insertIfFree(Long roomId, LocalDate checkIn, LocalDate checkOut, String userEmail) {
+        // 2. Đang giữ khoá nên kết quả kiểm tra không thể bị request khác làm sai lệch
+        if (bookingRepository.existsOverlap(roomId, checkIn, checkOut, HOLDING_STATUSES)) {
+            log.info("Từ chối đặt phòng {} ({} → {}) cho {}: trùng lịch", roomId, checkIn, checkOut, userEmail);
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Phòng đã có người đặt trong khoảng ngày này");
+        }
+
+        // 3. Ghi booking
+        Booking booking = new Booking();
+        booking.setRoomId(roomId);
+        booking.setCheckIn(checkIn);
+        booking.setCheckOut(checkOut);
+        booking.setUserEmail(userEmail);
+        booking.setStatus(Booking.PENDING_PAYMENT);
+        return bookingRepository.save(booking);
+    }
+
+    /** Tạo dòng khoá database cho phòng nếu chưa có. Hai request cùng tạo thì một bên lỗi khoá chính, bỏ qua được. */
     private void ensureLockRow(Long roomId) {
         if (roomLockRepository.existsById(roomId)) {
             return;
@@ -92,15 +125,17 @@ public class BookingService {
      * nên hai lần bấm thanh toán đồng thời chỉ có một lần được đi tiếp.
      */
     public Booking startPayment(Long id) {
-        return tx.execute(status -> {
+        Booking booking = tx.execute(status -> {
             int updated = bookingRepository.compareAndSetStatus(id, Booking.PENDING_PAYMENT, Booking.PAYING);
-            Booking booking = findOrThrow(id);
+            Booking current = findOrThrow(id);
             if (updated == 0) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        "Booking không ở trạng thái chờ thanh toán (hiện tại: " + booking.getStatus() + ")");
+                        "Booking không ở trạng thái chờ thanh toán (hiện tại: " + current.getStatus() + ")");
             }
-            return booking;
+            return current;
         });
+        updatePublisher.publish(booking);
+        return booking;
     }
 
     /**
@@ -112,7 +147,8 @@ public class BookingService {
      */
     public Booking applyPaymentResult(Long id, boolean success, boolean strict) {
         String target = success ? Booking.CONFIRMED : Booking.PAYMENT_FAILED;
-        return tx.execute(status -> {
+        boolean[] changed = {false};
+        Booking result = tx.execute(status -> {
             Booking booking = bookingRepository.findById(id).orElse(null);
             if (booking == null) {
                 if (strict) {
@@ -136,14 +172,20 @@ public class BookingService {
                 return booking;
             }
             booking.setStatus(target);
+            changed[0] = true;
             return bookingRepository.save(booking); // @Version chặn ghi đè đồng thời
         });
+        if (changed[0]) {
+            updatePublisher.publish(result);
+        }
+        return result;
     }
 
     // ================= HUỶ =================
 
     public Booking cancel(Long id, String requesterEmail, String requesterRole) {
-        return tx.execute(status -> {
+        boolean[] changed = {false};
+        Booking result = tx.execute(status -> {
             Booking booking = findOrThrow(id);
             boolean isAdmin = "ADMIN".equals(requesterRole);
             if (requesterEmail != null && !isAdmin && !requesterEmail.equals(booking.getUserEmail())) {
@@ -158,8 +200,13 @@ public class BookingService {
                         "Không thể huỷ booking đang ở trạng thái " + booking.getStatus());
             }
             booking.setStatus(Booking.CANCELLED);
+            changed[0] = true;
             return bookingRepository.save(booking);
         });
+        if (changed[0]) {
+            updatePublisher.publish(result);
+        }
+        return result;
     }
 
     // ================= ĐỌC =================

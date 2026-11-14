@@ -35,7 +35,8 @@ for DB in $DBS; do
     continue
   fi
   echo "[restore] $DB <- $FILE"
-  gunzip -c "$FILE" | psql -q -v ON_ERROR_STOP=1 -d "$DB" > /dev/null
+  # Ghi vào PRIMARY (replica chỉ cho đọc); thay đổi tự chảy sang replica
+  gunzip -c "$FILE" | psql -h "${RESTORE_HOST:-postgres}" -q -v ON_ERROR_STOP=1 -d "$DB" > /dev/null
 done
 
 echo "[restore] Xong."

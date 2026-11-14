@@ -90,3 +90,10 @@ function logout(){
 }
 
 loadDashboard();
+
+/* ===== REALTIME (Chương 4): booking mới / đổi trạng thái hiện ngay, không cần tải lại ===== */
+subscribeRealtime("/topic/admin.bookings", update => {
+  showToast("🔔 " + describeBookingUpdate(update) + " – " + update.userEmail);
+  loadDashboard();
+  if (document.getElementById("bookings").style.display === "block") loadBookings();
+});

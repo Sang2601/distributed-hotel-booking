@@ -25,6 +25,9 @@ public class RabbitConfig {
     public static final String DEAD_LETTER_EXCHANGE = "hotel.events.dlx";
     public static final String PAYMENT_COMPLETED_DLQ = "booking.payment-completed.dlq";
 
+    /** Chương 4: phát thay đổi booking tới MỌI instance booking-service (để đẩy WebSocket). */
+    public static final String BOOKING_UPDATES_EXCHANGE = "hotel.booking-updates";
+
     @Bean
     public TopicExchange hotelEventsExchange() {
         return new TopicExchange(EXCHANGE, true, false);
@@ -60,6 +63,22 @@ public class RabbitConfig {
         return BindingBuilder.bind(paymentCompletedDeadLetterQueue())
                 .to(deadLetterExchange())
                 .with(PAYMENT_COMPLETED_DLQ);
+    }
+
+    @Bean
+    public FanoutExchange bookingUpdatesExchange() {
+        return new FanoutExchange(BOOKING_UPDATES_EXCHANGE, true, false);
+    }
+
+    /** Hàng đợi riêng, tên ngẫu nhiên, tự xoá khi instance tắt: mỗi instance nhận một bản sao. */
+    @Bean
+    public AnonymousQueue bookingUpdatesQueue() {
+        return new AnonymousQueue();
+    }
+
+    @Bean
+    public Binding bookingUpdatesBinding() {
+        return BindingBuilder.bind(bookingUpdatesQueue()).to(bookingUpdatesExchange());
     }
 
     /** Message dạng JSON, chuyển thẳng sang kiểu tham số của @RabbitListener. */

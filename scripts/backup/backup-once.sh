@@ -1,6 +1,7 @@
 #!/bin/sh
 # Chương 7 – Sao lưu một lần tất cả database bằng pg_dump.
 # Chạy bên trong container db-backup (đã có PGHOST/PGUSER/PGPASSWORD).
+# PGHOST trỏ tới REPLICA: sao lưu không làm nặng node primary đang phục vụ ghi.
 # Kết quả: /backups/<thời-gian>/<database>.sql.gz
 
 TS=$(date +%Y%m%d-%H%M%S)

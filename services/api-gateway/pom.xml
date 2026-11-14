@@ -63,6 +63,17 @@
             <scope>test</scope>
         </dependency>
 
+
+        <!-- Chương 5: đăng ký với Eureka; Chương 8: cân bằng tải phía client -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+        </dependency>
+        <!-- Chương 8: metrics cho Prometheus -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>
