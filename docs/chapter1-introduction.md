@@ -27,37 +27,43 @@ Nếu làm một ứng dụng nguyên khối (monolith), mọi chức năng ch�
 
 | Yêu cầu | Cách đáp ứng | Chương |
 |---|---|---|
-| Nhất quán khi đặt đồng thời | Pessimistic lock theo phòng, compare-and-set, optimistic lock | 6 |
-| Bảo mật | JWT, phân quyền ADMIN/CUSTOMER, chặn API nội bộ tại Gateway | 5 |
-| Tách rời service | RabbitMQ cho luồng thanh toán → xác nhận booking | 2, 4 |
-| Bền vững dữ liệu | PostgreSQL + pg_dump tự động | 7 |
-| Chịu lỗi | Health check, tự khởi động lại, circuit breaker, retry, timeout, fallback, dead-letter queue | 8 |
+| Nhất quán khi đặt đồng thời | Khoá phân tán Redis (Redlock), dự phòng khoá database, compare-and-set, optimistic lock | 6 |
+| Bảo mật | JWT, phân quyền ADMIN/CUSTOMER, chặn API nội bộ tại Gateway, phân quyền kênh WebSocket | 5 |
+| Tách rời service | RabbitMQ cho luồng thanh toán, Eureka cho định vị service | 2, 4, 5 |
+| Hiệu năng | Redis cache danh sách phòng | 4 |
+| Thời gian thực | WebSocket (STOMP) báo trạng thái booking | 4 |
+| Bền vững dữ liệu | PostgreSQL primary + replica, pg_dump tự động | 7 |
+| Chịu lỗi, mở rộng | Nhiều instance, Nginx load balancer, Eureka + LoadBalancer, circuit breaker, retry, health check | 8 |
+| Quan sát hệ thống | Prometheus + Grafana (metrics), Loki (log tập trung) | 8 |
 
 ## 1.5. Tổng quan hệ thống
 
 ```mermaid
 flowchart LR
-    U[Trình duyệt<br/>frontend :5500] -->|HTTP + JWT| GW[API Gateway :8088]
+    U[Trình duyệt<br/>frontend :5500] -->|HTTP / WebSocket + JWT| LB[Nginx load balancer :8088]
+    LB --> GW1[api-gateway #1] & GW2[api-gateway #2]
+    REG[(Eureka<br/>discovery-server)]
 
-    GW --> AUTH[auth-service]
-    GW --> USER[user-service]
-    GW --> ROOM[room-service]
-    GW --> BOOK[booking-service]
-    GW --> PAY[payment-service]
+    GW1 & GW2 --> AUTH[auth-service]
+    GW1 & GW2 --> USER[user-service]
+    GW1 & GW2 --> ROOM[room-service ×2]
+    GW1 & GW2 --> BOOK[booking-service ×2]
+    GW1 & GW2 --> PAY[payment-service]
 
-    AUTH -->|REST| USER
-    BOOK -->|REST| ROOM
-    PAY -->|REST| BOOK
-    PAY -->|REST| ROOM
-    PAY -- "payment.completed" --> MQ[(RabbitMQ)]
-    MQ -- "payment.completed" --> BOOK
+    AUTH --> USER
+    BOOK --> ROOM
+    PAY --> BOOK & ROOM
+    PAY -- payment.completed --> MQ[(RabbitMQ)] --> BOOK
+    ROOM & BOOK --- RD[(Redis<br/>cache + lock)]
 
-    USER --- DB1[(userdb)]
-    ROOM --- DB2[(roomdb)]
-    BOOK --- DB3[(bookingdb)]
-    PAY --- DB4[(paymentdb)]
+    USER & ROOM & BOOK & PAY --- PG[(PostgreSQL primary)]
+    PG -- streaming replication --> PGR[(PostgreSQL replica)]
+    BK[db-backup] -. pg_dump .-> PGR
 
-    BK[db-backup] -. pg_dump định kỳ .-> DB1 & DB2 & DB3 & DB4
+    AUTH & USER & ROOM & BOOK & PAY & GW1 & GW2 -. đăng ký .-> REG
+    PROM[Prometheus] -. hỏi danh sách .-> REG
+    PROM --> GRAF[Grafana]
+    LOKI[Loki] --> GRAF
 ```
 
 ## 1.6. Công nghệ
@@ -66,9 +72,13 @@ flowchart LR
 |---|---|
 | Service | Java 17, Spring Boot 3.2, Spring Data JPA |
 | API Gateway | Spring Cloud Gateway (WebFlux) |
+| Service registry, cân bằng tải | Netflix Eureka, Spring Cloud LoadBalancer, Nginx |
 | Xác thực | JWT (jjwt), BCrypt |
 | Message broker | RabbitMQ 3.13 |
-| Database | PostgreSQL 16 (Docker), H2 (chạy local khi phát triển) |
+| Cache, khoá phân tán | Redis 7.2, Redisson |
+| Thời gian thực | WebSocket + STOMP |
+| Database | PostgreSQL 16 (primary + replica), H2 khi chạy local |
 | Chịu lỗi | Resilience4j, Spring Boot Actuator, Docker healthcheck + restart policy |
-| Triển khai | Docker, Docker Compose, Nginx (frontend) |
-| Frontend | HTML, CSS, JavaScript thuần |
+| Giám sát | Prometheus, Grafana, Loki, Promtail |
+| Triển khai | Docker, Docker Compose |
+| Frontend | HTML, CSS, JavaScript thuần, @stomp/stompjs |

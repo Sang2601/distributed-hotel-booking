@@ -9,10 +9,11 @@ import org.springframework.web.client.RestTemplate;
 @Component
 public class UserClient {
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate;
     private final String userServiceUrl;
 
-    public UserClient(@Value("${services.user-url}") String userServiceUrl) {
+    public UserClient(RestTemplate restTemplate, @Value("${services.user-url}") String userServiceUrl) {
+        this.restTemplate = restTemplate;
         this.userServiceUrl = userServiceUrl;
     }
 

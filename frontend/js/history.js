@@ -21,8 +21,8 @@ function logout(){
 /* ===== LOAD BOOKINGS ===== */
 const token = localStorage.getItem("token");
 
+function loadBookings(){
 fetch(`${API_BASE}/bookings/user?email=${email}`)
-
 .then(r=>r.json())
 .then(data=>{
   const active = data.filter(b=>b.status!=="CANCELLED");
@@ -69,6 +69,15 @@ fetch(`${API_BASE}/bookings/user?email=${email}`)
         </div>
       </div>
     `).join("");
+});
+}
+
+loadBookings();
+
+/* ===== REALTIME (Chương 4): server báo trạng thái booking thay đổi ===== */
+subscribeRealtime(`/topic/user.${email}`, update => {
+  showToast(describeBookingUpdate(update));
+  loadBookings();
 });
 
 function pay(id){

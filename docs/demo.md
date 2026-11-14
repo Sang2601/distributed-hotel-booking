@@ -1,19 +1,25 @@
 # Kịch bản demo khi thuyết trình
 
-Chạy các lệnh trong PowerShell, tại thư mục gốc dự án. Mở sẵn Docker Desktop.
+Chạy lệnh trong PowerShell tại thư mục gốc dự án. Mở sẵn Docker Desktop. Tổng thời gian khoảng 15 phút.
 
-## 0. Khởi động (trước buổi demo ~3 phút)
+## 0. Chuẩn bị (trước buổi demo ~5 phút)
 
 ```powershell
 docker compose up -d --build
-docker compose ps          # chờ tất cả (healthy)
+docker compose ps          # chờ tất cả (healthy), ~2 phút
 ```
 
-- Web: http://localhost:5500
-- Admin: http://localhost:5500/admin-login.html (`23010139@gmail.com` / `nht123456`)
-- RabbitMQ: http://localhost:15672 (guest / guest)
+Mở sẵn các tab:
 
-Lấy token để gọi API:
+| Tab | Địa chỉ |
+|---|---|
+| Web khách | http://localhost:5500 |
+| Web admin | http://localhost:5500/admin-login.html (`23010139@gmail.com` / `nht123456`) |
+| Eureka | http://localhost:8761 |
+| Grafana | http://localhost:3000 (admin / admin) – dashboard tự mở |
+| RabbitMQ | http://localhost:15672 (guest / guest) |
+
+Tạo tài khoản và lấy token:
 
 ```powershell
 $G = "http://localhost:8088/api"
@@ -22,24 +28,37 @@ $T = (Invoke-RestMethod -Method Post "$G/auth/login" -ContentType "application/j
 $H = @{ Authorization = "Bearer $T" }
 ```
 
-## 1. Kiến trúc (C1, C2) – 1 phút
+## 1. Kiến trúc + Service Registry (C1, C2, C5) – 2 phút
 
-Mở `docker compose ps`: 10 container, mỗi service một tiến trình. Mở sơ đồ trong [chapter2-architecture.md](chapter2-architecture.md).
+- `docker compose ps`: 21 container; gateway, room, booking mỗi loại 2 bản.
+- Tab **Eureka**: mỗi service đã tự đăng ký kèm IP. Giải thích: không còn ghi cứng `localhost:8083`, gọi bằng tên `room-service`.
+- Mở sơ đồ trong [chapter2-architecture.md](chapter2-architecture.md).
 
-## 2. Định danh (C5) – 1 phút
+## 2. Cân bằng tải (C8) – 1 phút
 
 ```powershell
-Invoke-WebRequest "$G/bookings/active"                  # 401: chưa đăng nhập
-Invoke-WebRequest "$G/users" -Headers $H                # 403: không phải admin
-Invoke-RestMethod "$G/bookings/active" -Headers $H      # 200
+1..6 | ForEach-Object {
+  $r = Invoke-WebRequest "$G/rooms/1" -UseBasicParsing
+  "{0}   gateway={1}" -f $r.Headers["X-Served-By"], $r.Headers["X-Gateway-Upstream"]
+}
 ```
 
-## 3. Đồng bộ hoá – chống đặt trùng (C6) – 2 phút
+Hai cột luân phiên giữa 2 instance. Trên Grafana, panel "Request/giây theo TỪNG instance" có các đường gần bằng nhau.
 
-10 request đồng thời đặt cùng phòng, cùng ngày:
+## 3. Định danh (C5) – 1 phút
 
 ```powershell
-$jobs = 1..10 | ForEach-Object {
+Invoke-WebRequest "$G/bookings/active" -UseBasicParsing          # 401: chưa đăng nhập
+Invoke-WebRequest "$G/users" -Headers $H -UseBasicParsing        # 403: không phải admin
+Invoke-RestMethod "$G/bookings/active" -Headers $H               # 200
+```
+
+## 4. Đồng bộ hoá – khoá phân tán (C6) – 2 phút
+
+20 request đồng thời đặt cùng phòng, rơi vào 2 instance booking-service khác nhau:
+
+```powershell
+$jobs = 1..20 | ForEach-Object {
   Start-Job -ArgumentList $G, $T -ScriptBlock {
     param($G, $T)
     try {
@@ -50,44 +69,83 @@ $jobs = 1..10 | ForEach-Object {
   }
 }
 $jobs | Wait-Job | Receive-Job | Group-Object | Select-Object Count, Name
+$jobs | Remove-Job
+docker compose logs booking-service | Select-String "trùng lịch" | Group-Object { $_.Line.Split(" ")[0] } | Select-Object Count, Name
 ```
 
-Kết quả mong đợi: `1 × 200 OK`, `9 × 409`.
+Kết quả: `1 × 200`, `19 × 409`, request chia cho cả hai instance. Grafana: panel "Khoá đặt phòng theo loại" tăng ở `redis`.
 
-## 4. Sự kiện + thanh toán (C2, C3, C4) – 2 phút
+## 5. Thời gian thực + sự kiện + cache (C2, C3, C4) – 3 phút
 
-Trên web: đăng nhập alice → Lịch sử → Thanh toán booking vừa tạo. Sau đó:
+1. Tab web khách: đăng nhập alice → **Lịch sử**. Góc trái dưới hiện **● Cập nhật trực tiếp**.
+2. Tab admin: đăng nhập admin, cũng có nhãn trực tiếp.
+3. Ở một tab khách khác: đặt phòng, rồi thanh toán.
+4. Không cần tải lại trang: tab Lịch sử và tab admin hiện thông báo "Booking #… đã thanh toán ✅".
+5. Chỉ ra luồng: payment-service → RabbitMQ → booking-service → fanout → WebSocket:
 
 ```powershell
 docker compose logs payment-service booking-service | Select-String "sự kiện"
 ```
 
-Chỉ ra hai dòng log trên hai service, hai luồng khác nhau (`nio-8084-exec-*` và `ntContainer#0-*`). Mở RabbitMQ UI → Queues → `booking.payment-completed`.
-
-## 5. Chịu lỗi (C8) – 2 phút
+Cache:
 
 ```powershell
-docker compose stop room-service
-# Admin → Quản lý booking: vẫn hiện, tên phòng "N/A"
-Invoke-RestMethod http://localhost:8088/actuator/health
-docker compose start room-service
-
-docker compose stop rabbitmq
-# Thanh toán một booking khác trên web: vẫn thành công (fallback REST)
-docker compose logs payment-service | Select-String "chuyển sang gọi REST"
-docker compose start rabbitmq
+docker compose exec redis redis-cli FLUSHALL
+1..4 | ForEach-Object { (Measure-Command { Invoke-RestMethod "$G/rooms" | Out-Null }).TotalMilliseconds }
+docker compose exec redis redis-cli KEYS "*"
 ```
 
-## 6. Sao lưu và khôi phục (C7) – 2 phút
+Lần đầu chậm (truy vấn DB), các lần sau nhanh (Redis).
+
+## 6. Chịu lỗi (C8) – 3 phút
+
+Để Grafana mở bên cạnh.
 
 ```powershell
+# a) Giết một instance – request vẫn thành công
+docker kill hotel-booking-room-service-1
+1..20 | ForEach-Object { (Invoke-WebRequest "$G/rooms/2" -UseBasicParsing).StatusCode } | Group-Object
+# Eureka/Grafana: room-service còn 1 instance sau ~15 giây
+
+# b) Tiến trình crash → Docker tự khởi động lại
+docker compose up -d
+docker compose exec --index 2 room-service kill 1
+Start-Sleep 5; docker inspect -f "{{.RestartCount}}" hotel-booking-room-service-2
+
+# c) Redis chết – đặt phòng chuyển sang khoá database, xem phòng đọc thẳng DB
+docker compose stop redis
+Invoke-RestMethod -Method Post "$G/bookings" -Headers $H -ContentType "application/json" -Body '{"roomId":13,"checkIn":"2027-01-01","checkOut":"2027-01-02"}'
+docker compose logs booking-service | Select-String "khoá database"
+docker compose start redis
+
+# d) Room-service chết hẳn – circuit breaker mở, trang admin vẫn chạy (tên phòng "N/A")
+docker compose stop room-service
+# Admin → Quản lý booking; Grafana: panel Circuit breaker chuyển OPEN
+docker compose start room-service
+```
+
+Log tập trung: Grafana → Explore → Loki → `{service=~".+"} | level="WARN"`.
+
+## 7. Replication + sao lưu + khôi phục (C7) – 2 phút
+
+```powershell
+# Replica đang đồng bộ, chỉ đọc
+docker compose exec postgres psql -U hotel -d postgres -c "select client_addr, state from pg_stat_replication"
+docker compose exec postgres-replica psql -U hotel -d bookingdb -c "select count(*) from booking"
+docker compose exec postgres-replica psql -U hotel -d bookingdb -c "delete from booking"   # bị từ chối
+
+# Sao lưu (từ replica)
 docker compose exec db-backup sh /scripts/backup-once.sh
 ls backups
-docker compose exec postgres psql -U hotel -d bookingdb -c "DELETE FROM booking"   # "sự cố"
+
+# "Sự cố": xoá nhầm trên primary → replica cũng mất theo
+docker compose exec postgres psql -U hotel -d bookingdb -c "DELETE FROM booking"
+docker compose exec postgres-replica psql -U hotel -d bookingdb -c "select count(*) from booking"
+
+# Khôi phục vào primary
 docker compose stop booking-service
 docker compose exec db-backup sh /scripts/restore.sh <tên-thư-mục-vừa-tạo> bookingdb
 docker compose start booking-service
-# Mở lại trang Lịch sử: booking đã trở lại
 ```
 
 ## Dọn dẹp

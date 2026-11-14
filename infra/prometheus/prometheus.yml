@@ -1,0 +1,31 @@
+# Chương 8 – Health monitoring.
+# Prometheus hỏi Eureka danh sách instance đang chạy (eureka_sd_configs), nên khi bật thêm
+# replica, instance mới tự xuất hiện trên biểu đồ mà không phải sửa file này.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: services
+    metrics_path: /actuator/prometheus
+    eureka_sd_configs:
+      - server: http://discovery-server:8761/eureka
+        refresh_interval: 10s
+    relabel_configs:
+      - source_labels: [__meta_eureka_app_instance_ip_addr, __meta_eureka_app_instance_port]
+        separator: ":"
+        target_label: __address__
+      - source_labels: [__meta_eureka_app_name]
+        action: lowercase
+        target_label: service
+
+  - job_name: discovery-server
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["discovery-server:8761"]
+        labels:
+          service: discovery-server
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

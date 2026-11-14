@@ -96,10 +96,9 @@ public class JwtAuthFilter implements GlobalFilter, Ordered {
         }
 
         boolean isPublic = anyMatch(PUBLIC, request);
-        String authHeader = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
-        boolean hasToken = authHeader != null && authHeader.startsWith("Bearer ");
+        String token = extractToken(request);
 
-        if (!hasToken) {
+        if (token == null) {
             if (isPublic) {
                 return chain.filter(exchange.mutate().request(cleaned).build());
             }
@@ -111,7 +110,7 @@ public class JwtAuthFilter implements GlobalFilter, Ordered {
             claims = Jwts.parserBuilder()
                     .setSigningKey(signingKey)
                     .build()
-                    .parseClaimsJws(authHeader.substring(7))
+                    .parseClaimsJws(token)
                     .getBody();
         } catch (JwtException | IllegalArgumentException e) {
             if (isPublic) {
@@ -133,6 +132,21 @@ public class JwtAuthFilter implements GlobalFilter, Ordered {
                 .build();
 
         return chain.filter(exchange.mutate().request(withIdentity).build());
+    }
+
+    /**
+     * Token lấy từ header Authorization. Riêng kết nối WebSocket (/ws/**): trình duyệt không gắn
+     * header tuỳ ý khi mở WebSocket, nên chấp nhận token qua query ?access_token=...
+     */
+    private static String extractToken(ServerHttpRequest request) {
+        String authHeader = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            return authHeader.substring(7);
+        }
+        if (MATCHER.match("/ws/**", request.getPath().value())) {
+            return request.getQueryParams().getFirst("access_token");
+        }
+        return null;
     }
 
     private static boolean anyMatch(List<Rule> rules, ServerHttpRequest request) {

@@ -1,30 +1,81 @@
 # Chương 8 – Tính chịu lỗi
 
-Mục tiêu: một thành phần gặp sự cố thì phần còn lại vẫn phục vụ được, và thành phần đó tự hồi phục.
+Mục tiêu: một thành phần gặp sự cố thì phần còn lại vẫn phục vụ được, thành phần đó tự hồi phục, và người vận hành **nhìn thấy** chuyện gì đang xảy ra.
 
-## 8.1. Health monitoring
+| Kỹ thuật (theo bảng điểm) | Cách làm trong hệ thống |
+|---|---|
+| Failover, Load Balancing | Nginx trước 2 api-gateway; Eureka + Spring Cloud LoadBalancer trước 2 room-service, 2 booking-service; retry sang instance khác |
+| Circuit Breaking | Resilience4j |
+| Health Monitoring | Actuator + Docker healthcheck; Prometheus + Grafana |
+| Log Management | Loki + Promtail, xem trên Grafana |
+| Tự phục hồi | Docker restart policy, Eureka loại instance chết, client WebSocket tự nối lại |
 
-Mọi service có Spring Boot Actuator: `GET /actuator/health` trả `{"status":"UP"}`. Docker gọi endpoint này mỗi 10 giây (`healthcheck` trong `docker-compose.yml`); trạng thái hiện trong `docker compose ps`:
+## 8.1. Load balancing và failover
+
+```mermaid
+flowchart LR
+    C((Client)) --> N[Nginx<br/>round-robin<br/>passive health check]
+    N --> G1[api-gateway #1] & G2[api-gateway #2]
+    G1 & G2 -->|lb:// + Retry| R1[room-service #1] & R2[room-service #2]
+    G1 & G2 -->|lb://| B1[booking #1] & B2[booking #2]
+    E[(Eureka)] -. danh sách instance sống .-> G1 & G2
+```
+
+**Tầng 1 – Nginx** ([load-balancer.conf](../infra/nginx/load-balancer.conf)): chia request xoay vòng giữa các IP của `api-gateway` (Docker DNS, phân giải lại mỗi 5 giây). Instance không kết nối được trong 1 giây thì bị loại 10 giây, request được chuyển sang instance khác (`proxy_next_upstream`). POST/PUT không bị gửi lại, nên không có nguy cơ đặt phòng hai lần.
+
+**Tầng 2 – Gateway + Eureka**: `lb://room-service` chọn instance từ danh sách Eureka. Bộ lọc `Retry` thử lại tối đa 2 lần cho request GET gặp lỗi kết nối/502/503/504, mỗi lần thử sang instance khác. Timeout kết nối 0,5 giây, phản hồi 10 giây.
+
+**Tầng 3 – Service gọi service**: `RestTemplate` có `@LoadBalanced` cùng retry của Resilience4j trong payment-service.
+
+**Kết quả kiểm thử**:
 
 ```
-booking-service   Up 5 minutes (healthy)
+6 lần GET /api/rooms/1 → X-Served-By luân phiên room-service@0e69…, room-service@9bc1…
+                         X-Gateway-Upstream luân phiên 172.23.0.12, 172.23.0.9
+
+docker kill room-service-1    → 30/30 request thành công (20/20 ở lần thử khác)
+docker kill booking-service-2 → 10/10 GET thành công, đặt phòng vẫn 200
+docker kill api-gateway-1     → 29/30 thành công, 1 request bị 504
 ```
 
-booking-service và payment-service còn hiển thị trạng thái circuit breaker: `GET /actuator/circuitbreakers`.
+Request lỗi khi gateway chết là request đang được gửi tới đúng instance vừa chết, trước khi Nginx kịp đánh dấu nó lỗi (cơ chế phát hiện thụ động). Nginx bản thương mại hoặc HAProxy có health check chủ động sẽ khắc phục được.
 
-## 8.2. Tự khởi động lại
+## 8.2. Health monitoring – Prometheus + Grafana
 
-`restart: unless-stopped`: tiến trình chết (lỗi, hết bộ nhớ) thì Docker tự chạy lại. `depends_on: service_healthy` đảm bảo service chỉ khởi động khi các phụ thuộc đã sẵn sàng.
+Mọi service xuất metrics tại `/actuator/prometheus` (Micrometer). **Prometheus tự tìm target qua Eureka** ([prometheus.yml](../infra/prometheus/prometheus.yml)): bật thêm replica thì instance mới tự xuất hiện, không phải sửa cấu hình.
 
-## 8.3. Timeout
+Dashboard **"Hotel Booking – Giám sát hệ thống"** (http://localhost:3000, tự mở khi vào Grafana, tài khoản admin/admin), 17 panel:
 
-Mọi lời gọi REST giữa service có timeout kết nối 2s, đọc 3s. Một service bị treo không giữ luồng của service gọi nó mãi mãi.
+| Nhóm | Panel |
+|---|---|
+| Tổng quan | Số instance đang chạy theo service; request/giây; độ trễ p95 |
+| Cân bằng tải | Request/giây theo **từng instance** (thấy tải chia đều); lỗi 5xx/giây |
+| Tài nguyên JVM | Heap, CPU theo instance |
+| Chịu lỗi, cache, khoá | Trạng thái circuit breaker (CLOSED/OPEN); Redis cache hit/miss; số lần khoá Redis vs database; message RabbitMQ xử lý/giây |
+| Log | Log WARN/ERROR toàn hệ thống; log nghiệp vụ |
 
-## 8.4. Retry
+Ngoài ra Docker kiểm tra `/actuator/health` mỗi 10 giây; trạng thái hiện trong `docker compose ps`.
 
-payment-service tự thử lại tối đa 3 lần (cách nhau 500ms) khi gọi booking-service/room-service gặp lỗi mạng hoặc lỗi 5xx. Không thử lại với lỗi 4xx (ví dụ booking không tồn tại) vì thử lại cũng không khác. Không thử lại `start-payment` vì thao tác này không idempotent.
+## 8.3. Log management – Loki
 
-## 8.5. Circuit breaker (Resilience4j)
+Trước đây log nằm rải rác trong 21 container. **Promtail** đọc log mọi container qua Docker API, gắn nhãn `service`, `container`, `level` rồi đẩy về **Loki**. Tìm log toàn hệ thống ở một chỗ: Grafana → Explore → Loki, ví dụ:
+
+```
+{service="booking-service"} |= "Nhận sự kiện thanh toán"
+{service=~".+"} | level="WARN"
+{service="room-service"} |= "Cache miss"
+```
+
+## 8.4. Tự khởi động lại
+
+`restart: unless-stopped`: tiến trình chết thì Docker tự chạy lại. Kiểm thử: giết JVM bên trong room-service (`kill 1`) → `RestartCount=1`, container chạy lại, đăng ký lại Eureka. (Lệnh `docker kill`/`docker stop` được Docker coi là dừng chủ động nên không tự khởi động lại.)
+
+## 8.5. Timeout và retry
+
+- Gọi service khác: kết nối 0,5s, đọc 3s.
+- payment-service thử lại tối đa 3 lần khi gặp lỗi mạng/5xx; không thử lại lỗi 4xx; không thử lại `start-payment` (không idempotent).
+
+## 8.6. Circuit breaker (Resilience4j)
 
 ```mermaid
 stateDiagram-v2
@@ -34,42 +85,25 @@ stateDiagram-v2
     HALF_OPEN --> OPEN: thử vẫn lỗi
 ```
 
-Khi OPEN, lời gọi bị từ chối **ngay lập tức** (không chờ timeout), service gọi dùng phương án dự phòng:
+| Nơi gọi | Dự phòng khi phía sau chết |
+|---|---|
+| booking-service → room-service | Trang admin vẫn hiện booking, tên phòng "N/A" |
+| payment-service → booking/room | Trả 503, booking **không** chuyển sang PAYING nên khách thanh toán lại được |
 
-| Nơi gọi | Circuit | Dự phòng khi room-service/booking-service chết |
+## 8.7. Suy giảm có kiểm soát khi hạ tầng phụ lỗi
+
+| Thành phần chết | Hệ thống phản ứng | Kết quả kiểm thử |
 |---|---|---|
-| booking-service → room-service | `roomService` | Trang admin vẫn hiện danh sách booking, tên phòng ghi "N/A" |
-| payment-service → booking/room | `bookingService`, `roomService` | Trả 503 "Hệ thống tạm thời gián đoạn", booking **không** bị chuyển sang PAYING nên khách thanh toán lại được sau |
+| **Redis** | Cache: đọc thẳng PostgreSQL. Khoá: chuyển sang `SELECT FOR UPDATE`, bỏ qua Redis 10 giây | Đặt phòng đồng thời vẫn `1×200, 9×409`; đợt thứ hai xong trong 0,5s; Redis sống lại tự quay về khoá Redis |
+| **RabbitMQ** | payment-service gọi REST thẳng booking-service; WebSocket chỉ báo được cho client cùng instance | Thanh toán vẫn 200, booking `CONFIRMED` |
+| **Một instance bất kỳ** | Load balancer + Eureka chuyển sang instance còn lại | Mục 8.1 |
+| **PostgreSQL primary** | Replica còn nguyên dữ liệu (chuyển đổi bằng tay) | Chương 7 |
 
-**Kết quả kiểm thử** (tắt room-service):
+Message xử lý lỗi 3 lần được chuyển sang dead-letter queue `booking.payment-completed.dlq` thay vì bị bỏ.
 
-```
-GET /api/bookings/admin → 200, "roomName":"N/A"
-circuit roomService      → "state":"OPEN"
-POST /api/payments       → 503 "Không lấy được thông tin phòng"
-booking vẫn ở trạng thái → PENDING_PAYMENT
-```
+## 8.8. Hạn chế còn lại
 
-## 8.6. Fallback khi message broker chết
-
-Nếu không gửi được sự kiện lên RabbitMQ, payment-service chuyển sang gọi REST thẳng tới booking-service (`PUT /bookings/{id}/confirm` hoặc `/fail`). Vì booking-service xử lý idempotent (Chương 6), nếu sau này message cũng tới thì không gây sai lệch.
-
-**Kết quả kiểm thử** (tắt RabbitMQ): thanh toán vẫn trả 200, booking chuyển `CONFIRMED`. Log:
-
-```
-WARN PaymentEventPublisher : Không gửi được sự kiện lên RabbitMQ (...), chuyển sang gọi REST trực tiếp
-```
-
-## 8.7. Dead-letter queue
-
-Message xử lý lỗi 3 lần liên tiếp được chuyển sang `booking.payment-completed.dlq` thay vì lặp vô hạn hoặc bị bỏ. Quản trị viên xem tại http://localhost:15672 → Queues.
-
-## 8.8. Tự huỷ booking treo
-
-Booking bị bỏ dở ở `PENDING_PAYMENT` được job định kỳ huỷ sau 15 phút (Chương 3), để phòng không bị khoá mãi.
-
-## 8.9. Hạn chế còn lại
-
-- Mỗi service hiện chỉ chạy **một instance**; chưa có cân bằng tải và tự mở rộng (Nginx/HAProxy, Kubernetes HPA).
-- Chưa có Prometheus/Grafana để vẽ biểu đồ theo thời gian, và chưa gom log tập trung (ELK).
+- Eureka, Nginx load balancer, Redis, RabbitMQ, PostgreSQL primary mỗi thứ chỉ có **một** bản: vẫn là điểm lỗi đơn. Hệ thống thật cần cụm (Eureka peer, Keepalived + 2 Nginx, Redis Sentinel, RabbitMQ cluster, Patroni).
+- Chưa tự mở rộng theo tải (Kubernetes HPA); số replica cố định trong `docker-compose.yml`.
+- Khi một instance chết đột ngột, có tới khoảng 20 giây request phải thử lại (Eureka cần 15 giây để loại instance), nên chậm hơn bình thường dù vẫn thành công.
 - Nếu cả RabbitMQ **và** booking-service cùng chết đúng lúc thanh toán, booking nằm ở `PAYING` và cần xử lý tay (giải pháp đầy đủ: Transactional Outbox).

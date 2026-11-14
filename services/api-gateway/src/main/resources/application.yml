@@ -5,20 +5,23 @@ server:
 jwt:
   secret: ${JWT_SECRET:hotel-booking-secret-key-1234567890-abcdef}
 
-# Địa chỉ các service. Chạy local dùng localhost, chạy Docker dùng tên service (Docker DNS)
-services:
-  auth-url: ${AUTH_SERVICE_URL:http://localhost:8080}
-  user-url: ${USER_SERVICE_URL:http://localhost:8081}
-  booking-url: ${BOOKING_SERVICE_URL:http://localhost:8082}
-  room-url: ${ROOM_SERVICE_URL:http://localhost:8083}
-  payment-url: ${PAYMENT_SERVICE_URL:http://localhost:8084}
-
 spring:
   application:
     name: api-gateway
 
   cloud:
+    # Làm mới danh sách instance từ Eureka thường xuyên để bỏ nhanh instance đã chết
+    loadbalancer:
+      cache:
+        ttl: 5s
+
     gateway:
+      # Instance phía sau chết đột ngột: lỗi sau tối đa 0,5s (kết nối) / 10s (phản hồi)
+      # thay vì treo lâu, để bộ lọc Retry kịp chuyển sang instance khác.
+      httpclient:
+        connect-timeout: 500
+        response-timeout: 10s
+
       globalcors:
         add-to-simple-url-handler-mapping: true
         corsConfigurations:
@@ -37,44 +40,82 @@ spring:
               - "*"
             allowCredentials: true
 
+      # Chương 8 – Failover: request GET gặp lỗi kết nối / 502 / 503 sẽ được thử lại,
+      # LoadBalancer chọn instance KHÁC cho lần thử lại. Không thử lại POST/PUT để tránh làm 2 lần.
+      default-filters:
+        - name: Retry
+          args:
+            retries: 2
+            methods: GET
+            statuses: BAD_GATEWAY, SERVICE_UNAVAILABLE, GATEWAY_TIMEOUT
+            exceptions: java.io.IOException, java.util.concurrent.TimeoutException, org.springframework.cloud.gateway.support.NotFoundException
+            backoff:
+              firstBackoff: 100ms
+              maxBackoff: 500ms
+              factor: 2
+
+      # lb://<tên-service>: hỏi Eureka danh sách instance rồi chia tải round-robin (Chương 5, 8)
       routes:
         - id: auth-service
-          uri: ${services.auth-url}
+          uri: lb://auth-service
           predicates:
             - Path=/api/auth/**
           filters:
             - StripPrefix=1
 
         - id: user-service
-          uri: ${services.user-url}
+          uri: lb://user-service
           predicates:
             - Path=/api/users/**
           filters:
             - StripPrefix=1
 
         - id: booking-service
-          uri: ${services.booking-url}
+          uri: lb://booking-service
           predicates:
             - Path=/api/bookings/**
           filters:
             - StripPrefix=1
 
+        # Chương 4: WebSocket thông báo thời gian thực
+        - id: booking-websocket
+          uri: lb:ws://booking-service
+          predicates:
+            - Path=/ws/**
+
         - id: room-service
-          uri: ${services.room-url}
+          uri: lb://room-service
           predicates:
             - Path=/api/rooms/**
           filters:
             - StripPrefix=1
 
         - id: payment-service
-          uri: ${services.payment-url}
+          uri: lb://payment-service
           predicates:
             - Path=/api/payments/**
           filters:
             - StripPrefix=1
 
+# Chương 5: Service Registry
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka}
+    registry-fetch-interval-seconds: 5
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 15
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true

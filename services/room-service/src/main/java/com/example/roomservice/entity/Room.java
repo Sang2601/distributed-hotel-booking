@@ -1,9 +1,12 @@
 package com.example.roomservice.entity;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import jakarta.persistence.*;
 
 @Entity
 @Table(name = "rooms")
+// Cho phép Jackson đọc/ghi thẳng vào field khi lưu và lấy Room từ Redis cache
+@JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
 public class Room {
 
     @Id
