@@ -21,7 +21,7 @@ function logout(){
 /* ===== LOAD BOOKINGS ===== */
 const token = localStorage.getItem("token");
 
-fetch(`https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/bookings/user?email=${email}`)
+fetch(`${API_BASE}/bookings/user?email=${email}`)
 
 .then(r=>r.json())
 .then(data=>{
@@ -44,6 +44,11 @@ fetch(`https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/bookings/
        <button class="btn btn-cancel" onclick="cancel(${b.id})">Huỷ</button>`
   : b.status === "CONFIRMED"
     ? `<span>✅ Đã thanh toán</span>`
+  : b.status === "PAYING"
+    ? `<span>⏳ Đang xử lý thanh toán</span>`
+  : b.status === "PAYMENT_FAILED"
+    ? `<span style="color:#d32f2f">❌ Thanh toán thất bại</span>
+       <button class="btn btn-cancel" onclick="cancel(${b.id})">Huỷ</button>`
   : b.status === "CANCELLED"
     ? `<span style="color:#d32f2f">❌ Đã huỷ</span>`
   : ""
@@ -74,8 +79,14 @@ function pay(id){
 function cancel(id){
   if(!confirm("Huỷ booking?")) return;
 fetch(
-  `https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/bookings/${id}/cancel`,
+  `${API_BASE}/bookings/${id}/cancel`,
   { method:"PUT" }
 )
-    .then(()=>location.reload());
+    .then(async res => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert("❌ " + (body.message || "Không huỷ được booking"));
+      }
+      location.reload();
+    });
 }

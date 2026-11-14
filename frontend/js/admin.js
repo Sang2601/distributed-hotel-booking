@@ -1,4 +1,4 @@
-const BASE="https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api";
+const BASE=API_BASE;
 
 function show(id,el){
   document.querySelectorAll("section").forEach(s=>s.style.display="none");

@@ -1,12 +1,16 @@
 package com.example.paymentservice.controller;
 
-import com.example.paymentservice.entity.Payment;
-import com.example.paymentservice.repository.PaymentRepository;
+import com.example.paymentservice.client.BookingClient;
+import com.example.paymentservice.client.RoomClient;
 import com.example.paymentservice.dto.BookingResponse;
 import com.example.paymentservice.dto.RoomResponse;
+import com.example.paymentservice.entity.Payment;
+import com.example.paymentservice.messaging.PaymentEventPublisher;
+import com.example.paymentservice.repository.PaymentRepository;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.HttpClientErrorException;
 
 import java.util.Random;
 
@@ -14,94 +18,87 @@ import java.util.Random;
 @RequestMapping("/payments")
 public class PaymentController {
 
+    private static final String SERVICE_DOWN_MESSAGE =
+            "❌ Hệ thống tạm thời gián đoạn, vui lòng thử lại sau ít phút";
+
     private final PaymentRepository paymentRepository;
-    private final RestTemplate restTemplate;
+    private final BookingClient bookingClient;
+    private final RoomClient roomClient;
+    private final PaymentEventPublisher eventPublisher;
     private final Random random = new Random();
 
-    public PaymentController(
-            PaymentRepository paymentRepository,
-            RestTemplate restTemplate
-    ) {
+    public PaymentController(PaymentRepository paymentRepository,
+                             BookingClient bookingClient,
+                             RoomClient roomClient,
+                             PaymentEventPublisher eventPublisher) {
         this.paymentRepository = paymentRepository;
-        this.restTemplate = restTemplate;
+        this.bookingClient = bookingClient;
+        this.roomClient = roomClient;
+        this.eventPublisher = eventPublisher;
     }
 
     // ================== PAY ==================
-    // ================== PAY ==================
-@PostMapping
-public ResponseEntity<?> pay(@RequestBody Payment payment) {
+    @PostMapping
+    public ResponseEntity<?> pay(@RequestBody Payment payment) {
 
-    // 1️⃣ LẤY BOOKING
-    String bookingUrl =
-            "http://localhost:8088/api/bookings/" + payment.getBookingId();
+        if (payment.getBookingId() == null) {
+            return ResponseEntity.badRequest().body("❌ Thiếu mã booking");
+        }
 
-    BookingResponse booking;
-    try {
-        booking = restTemplate.getForObject(
-                bookingUrl,
-                BookingResponse.class
-        );
-    } catch (Exception e) {
-        return ResponseEntity
-                .badRequest()
-                .body("❌ Booking không tồn tại");
+        // 1️⃣ LẤY BOOKING (gọi thẳng booking-service, có retry + circuit breaker)
+        BookingResponse booking;
+        try {
+            booking = bookingClient.getBooking(payment.getBookingId());
+        } catch (HttpClientErrorException.NotFound e) {
+            return ResponseEntity.badRequest().body("❌ Booking không tồn tại");
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(SERVICE_DOWN_MESSAGE);
+        }
+
+        // 2️⃣ CHECK TRẠNG THÁI BOOKING
+        if ("CANCELLED".equals(booking.getStatus())) {
+            return ResponseEntity.badRequest().body("❌ Booking đã bị huỷ");
+        }
+        if (!"PENDING_PAYMENT".equals(booking.getStatus())) {
+            return ResponseEntity.badRequest().body("❌ Booking không hợp lệ để thanh toán");
+        }
+
+        // 3️⃣ LẤY GIÁ PHÒNG TỪ ROOM SERVICE (BACKEND QUYẾT ĐỊNH)
+        RoomResponse room;
+        try {
+            room = roomClient.getRoom(booking.getRoomId());
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("❌ Không lấy được thông tin phòng");
+        }
+        if (room == null || room.getPrice() == null) {
+            return ResponseEntity.badRequest().body("❌ Giá phòng không hợp lệ");
+        }
+
+        // 4️⃣ GIỮ QUYỀN THANH TOÁN (Chương 6): PENDING_PAYMENT → PAYING một cách nguyên tử.
+        //     Hai lần bấm thanh toán đồng thời: chỉ một lần qua được bước này, lần kia nhận 409.
+        try {
+            bookingClient.startPayment(booking.getId());
+        } catch (HttpClientErrorException.Conflict e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body("❌ Booking đang được thanh toán hoặc đã thanh toán");
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(SERVICE_DOWN_MESSAGE);
+        }
+
+        // 5️⃣ SET DỮ LIỆU PAYMENT (BACKEND TOÀN QUYỀN) + GIẢ LẬP THANH TOÁN
+        payment.setBookingId(booking.getId());
+        payment.setAmount(room.getPrice());
+        boolean success = random.nextInt(10) < 7;
+        payment.setStatus(success ? "SUCCESS" : "FAILED");
+
+        Payment savedPayment = paymentRepository.save(payment);
+
+        // 6️⃣ PHÁT SỰ KIỆN cho booking-service (bất đồng bộ qua RabbitMQ)
+        eventPublisher.publishCompleted(savedPayment);
+
+        // 7️⃣ TRẢ KẾT QUẢ
+        return ResponseEntity.ok(savedPayment);
     }
-
-    // 2️⃣ CHECK TRẠNG THÁI BOOKING
-    if ("CANCELLED".equals(booking.getStatus())) {
-        return ResponseEntity
-                .badRequest()
-                .body("❌ Booking đã bị huỷ");
-    }
-
-    if (!"PENDING_PAYMENT".equals(booking.getStatus())) {
-        return ResponseEntity
-                .badRequest()
-                .body("❌ Booking không hợp lệ để thanh toán");
-    }
-
-    // 3️⃣ LẤY GIÁ PHÒNG TỪ ROOM SERVICE (BACKEND QUYẾT ĐỊNH)
-    String roomUrl =
-            "http://localhost:8088/api/rooms/" + booking.getRoomId();
-
-    RoomResponse room;
-    try {
-        room = restTemplate.getForObject(
-                roomUrl,
-                RoomResponse.class
-        );
-    } catch (Exception e) {
-        return ResponseEntity
-                .badRequest()
-                .body("❌ Không lấy được thông tin phòng");
-    }
-
-    if (room == null || room.getPrice() == null) {
-        return ResponseEntity
-                .badRequest()
-                .body("❌ Giá phòng không hợp lệ");
-    }
-
-    // 4️⃣ SET DỮ LIỆU PAYMENT (BACKEND TOÀN QUYỀN)
-    payment.setBookingId(booking.getId());
-    payment.setAmount(room.getPrice());
-
-    // 5️⃣ GIẢ LẬP THANH TOÁN
-    boolean success = random.nextInt(10) < 7;
-    payment.setStatus(success ? "SUCCESS" : "FAILED");
-
-    Payment savedPayment = paymentRepository.save(payment);
-
-    // 6️⃣ UPDATE BOOKING
-    if (success) {
-        restTemplate.put(bookingUrl + "/confirm", null);
-    } else {
-        restTemplate.put(bookingUrl + "/fail", null);
-    }
-
-    // 7️⃣ TRẢ KẾT QUẢ
-    return ResponseEntity.ok(savedPayment);
-}
 
     // ================== REVENUE ==================
     @GetMapping("/revenue/total")

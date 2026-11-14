@@ -1,0 +1,195 @@
+# Distributed Hotel Booking – chạy toàn bộ hệ thống bằng một lệnh:
+#   docker compose up -d --build
+#
+# Cổng mở ra máy host:
+#   5500  frontend (nginx)
+#   8088  api-gateway (cửa vào duy nhất của API)
+#   15672 RabbitMQ Management UI (guest / guest)
+# Các service còn lại chỉ nói chuyện với nhau trong mạng Docker, gọi nhau bằng tên (Docker DNS).
+
+name: hotel-booking
+
+x-db-credentials: &db-credentials
+  DB_USERNAME: ${POSTGRES_USER:-hotel}
+  DB_PASSWORD: ${POSTGRES_PASSWORD:-hotel123}
+
+x-spring-service: &spring-service
+  restart: unless-stopped
+  mem_limit: 512m
+  healthcheck: &spring-healthcheck
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 40s
+
+services:
+
+  # ================= HẠ TẦNG =================
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hotel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hotel123}
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Mỗi service một database riêng (database-per-service)
+      - ./infra/postgres/init-databases.sql:/docker-entrypoint-initdb.d/01-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hotel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    ports:
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  # Chương 7: sao lưu tự động bằng pg_dump theo chu kỳ, file nằm ở ./backups trên máy host
+  db-backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-hotel}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-hotel123}
+      BACKUP_DATABASES: "userdb bookingdb paymentdb roomdb"
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-3600}
+      BACKUP_KEEP: ${BACKUP_KEEP:-24}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup:/scripts:ro
+    entrypoint: ["sh", "/scripts/backup-loop.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ================= MICROSERVICES =================
+
+  user-service:
+    <<: *spring-service
+    build: ./services/user-service
+    environment:
+      <<: *db-credentials
+      DB_URL: jdbc:postgresql://postgres:5432/userdb
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/actuator/health"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  auth-service:
+    <<: *spring-service
+    build: ./services/auth-service
+    environment:
+      USER_SERVICE_URL: http://user-service:8081
+      JWT_SECRET: ${JWT_SECRET:-hotel-booking-secret-key-1234567890-abcdef}
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+    depends_on:
+      user-service:
+        condition: service_healthy
+
+  room-service:
+    <<: *spring-service
+    build: ./services/room-service
+    environment:
+      <<: *db-credentials
+      DB_URL: jdbc:postgresql://postgres:5432/roomdb
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8083/actuator/health"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  booking-service:
+    <<: *spring-service
+    build: ./services/booking-service
+    environment:
+      <<: *db-credentials
+      DB_URL: jdbc:postgresql://postgres:5432/bookingdb
+      ROOM_SERVICE_URL: http://room-service:8083
+      RABBITMQ_HOST: rabbitmq
+      BOOKING_PAYMENT_TIMEOUT_MINUTES: ${BOOKING_PAYMENT_TIMEOUT_MINUTES:-15}
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8082/actuator/health"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  payment-service:
+    <<: *spring-service
+    build: ./services/payment-service
+    environment:
+      <<: *db-credentials
+      DB_URL: jdbc:postgresql://postgres:5432/paymentdb
+      BOOKING_SERVICE_URL: http://booking-service:8082
+      ROOM_SERVICE_URL: http://room-service:8083
+      RABBITMQ_HOST: rabbitmq
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8084/actuator/health"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      booking-service:
+        condition: service_healthy
+
+  api-gateway:
+    <<: *spring-service
+    build: ./services/api-gateway
+    ports:
+      - "8088:8088"
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:8080
+      USER_SERVICE_URL: http://user-service:8081
+      BOOKING_SERVICE_URL: http://booking-service:8082
+      ROOM_SERVICE_URL: http://room-service:8083
+      PAYMENT_SERVICE_URL: http://payment-service:8084
+      JWT_SECRET: ${JWT_SECRET:-hotel-booking-secret-key-1234567890-abcdef}
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8088/actuator/health"]
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      room-service:
+        condition: service_healthy
+      booking-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+
+  # ================= FRONTEND =================
+
+  frontend:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "5500:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - api-gateway
+
+volumes:
+  pgdata:

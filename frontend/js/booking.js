@@ -22,7 +22,7 @@ function searchRooms() {
         return;
     }
 
-   const url = `https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/rooms/search?capacity=${capacity}&checkIn=${checkIn}&checkOut=${checkOut}`;
+   const url = `${API_BASE}/rooms/search?capacity=${capacity}&checkIn=${checkIn}&checkOut=${checkOut}`;
 
     fetch(url)
         .then(res => res.json())
@@ -108,7 +108,7 @@ function bookRoom(roomId) {
         alert("Thiếu ngày check-in hoặc check-out");
         return;
     }
-        fetch("https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/bookings", {
+        fetch(API_BASE + "/bookings", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
@@ -121,9 +121,14 @@ function bookRoom(roomId) {
             userEmail: localStorage.getItem("email")
         })
     })
-    .then(res => {
+    .then(async res => {
+        if (res.status === 409) {
+            // Chương 6: phòng đã có người giữ trong khoảng ngày này
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.message || "Phòng đã có người đặt trong khoảng ngày này");
+        }
         if (!res.ok) {
-            throw new Error("Booking failed: " + res.status);
+            throw new Error("Đặt phòng thất bại (mã lỗi " + res.status + ")");
         }
         return res.json();
     })
@@ -134,7 +139,7 @@ function bookRoom(roomId) {
 })
     .catch(err => {
         console.error(err);
-        alert("❌ Đặt phòng thất bại");
+        alert("❌ " + err.message);
     });
 }
 
@@ -227,9 +232,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function loadAllRooms() {
     Promise.all([
-        fetch("https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/rooms")
+        fetch(API_BASE + "/rooms")
             .then(res => res.json()),
-        fetch("https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/bookings/active")
+        fetch(API_BASE + "/bookings/active")
             .then(res => res.json())
     ])
     .then(([rooms, bookings]) => {

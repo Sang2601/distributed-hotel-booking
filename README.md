@@ -1,90 +1,72 @@
-# distributed-hotel-booking
-Distributed Hotel Booking System - Distributed Applications
-cd /workspaces/distributed-hotel-booking
-pwd
+# Distributed Hotel Booking
 
-# CHẠY USER-SERVICE
-cd services/user-service
-./mvnw clean spring-boot:run
+Hệ thống đặt phòng khách sạn theo kiến trúc phân tán: 6 microservice Spring Boot, API Gateway kiểm tra JWT, RabbitMQ cho luồng sự kiện thanh toán, PostgreSQL với sao lưu tự động.
 
-# CHẠY AUTH-SERVICE
-cd services/auth-service
-./mvnw clean spring-boot:run
+## Chạy hệ thống
 
-# CHẠY BOOKING SERVICE
-cd /workspaces/distributed-hotel-booking
+Yêu cầu: Docker Desktop (không cần cài Java hay Maven, việc build diễn ra trong container).
+
+```powershell
+docker compose up -d --build
+docker compose ps        # chờ tất cả service ở trạng thái (healthy), khoảng 1–2 phút
+```
+
+| Địa chỉ | Nội dung |
+|---|---|
+| http://localhost:5500 | Trang khách: đăng ký, đăng nhập, đặt phòng, thanh toán |
+| http://localhost:5500/admin-login.html | Trang quản trị (`23010139@gmail.com` / `nht123456`) |
+| http://localhost:8088/api | API Gateway |
+| http://localhost:15672 | RabbitMQ Management (guest / guest) |
+
+Dừng: `docker compose down` (giữ dữ liệu) hoặc `docker compose down -v` (xoá dữ liệu).
+
+## Kiến trúc
+
+```mermaid
+flowchart LR
+    U[frontend :5500] -->|JWT| GW[api-gateway :8088]
+    GW --> AUTH[auth-service] & USER[user-service] & ROOM[room-service] & BOOK[booking-service] & PAY[payment-service]
+    AUTH --> USER
+    BOOK --> ROOM
+    PAY --> BOOK & ROOM
+    PAY -- payment.completed --> MQ[(RabbitMQ)] --> BOOK
+    USER & ROOM & BOOK & PAY --- PG[(PostgreSQL<br/>4 database)]
+    BK[db-backup] -.-> PG
+```
+
+## Tài liệu theo bảng chấm điểm
+
+| Chương | Nội dung chính | Tài liệu |
+|---|---|---|
+| 1. Mở đầu | Bài toán, mục tiêu, yêu cầu, sơ đồ tổng thể | [chapter1](docs/chapter1-introduction.md) |
+| 2. Kiến trúc | Microservices + event-driven, database-per-service, sơ đồ tuần tự/triển khai | [chapter2](docs/chapter2-architecture.md) |
+| 3. Tiến trình & luồng | Container, healthcheck, restart, thread pool, consumer threads, `@Scheduled` tự huỷ booking | [chapter3](docs/chapter3-process-thread.md) |
+| 4. Trao đổi thông tin | REST, RabbitMQ (topic exchange, DLQ) | [chapter4](docs/chapter4-communication.md) |
+| 5. Định danh | Docker DNS, JWT kiểm tra tại Gateway, phân quyền, URI | [chapter5](docs/chapter5-identification.md) |
+| 6. Đồng bộ hoá | Pessimistic lock chống đặt trùng, compare-and-set chống thanh toán 2 lần, `@Version`, consumer idempotent | [chapter6](docs/chapter6-synchronization.md) |
+| 7. Sao lưu | PostgreSQL, `pg_dump` tự động, khôi phục | [chapter7](docs/chapter7-backup.md) |
+| 8. Chịu lỗi | Health check, restart, timeout, retry, circuit breaker, fallback, DLQ | [chapter8](docs/chapter8-fault-tolerance.md) |
+| Thuyết trình | Kịch bản demo từng chương | [demo](docs/demo.md) |
+
+## Chạy một service riêng khi phát triển (không Docker)
+
+Mỗi service vẫn chạy được độc lập với H2 in-memory (cần Java 17+ và Maven):
+
+```bash
 cd services/booking-service
 mvn spring-boot:run
+```
 
-# CHẠY API-GATEWAY
-cd services/api-gateway
-./mvnw clean spring-boot:run
+booking-service và payment-service cần RabbitMQ ở `localhost:5672` cho luồng sự kiện; thiếu RabbitMQ thì payment-service tự chuyển sang gọi REST.
 
-# room-service
-cd services/room-service
-mvn spring-boot:run
+## Cấu hình qua biến môi trường
 
-# Payment Service
-cd services/payment-service
-mvn spring-boot:run
+Tạo file `.env` cạnh `docker-compose.yml` để ghi đè:
 
-# web
-cd /workspaces/distributed-hotel-booking/frontend
-python3 -m http.server 5500
-
-
-# LOGIN QUA API GATEWAY (LẤY TOKEN)
-
-curl -X POST http://localhost:8088/api/auth/login \
--H "Content-Type: application/json" \
--d '{"email":"admin@test.com","password":"123456"}'
-
-# GỌI USER SERVICE QUA GATEWAY (JWT)
-curl http://localhost:8088/api/users \
--H "Authorization: Bearer <TOKEN>"
-
-
-
-curl http://localhost:8082/users \
--H "Authorization: Bearer <PASTE_TOKEN_HERE>"
-
-cd /workspaces/distributed-hotel-booking/frontend
-python3 -m http.server 5500
-
-# Mở H2 Console
-http://localhost:8081/h2-console
-jdbc:h2:mem:bookingdb
-
-SELECT * FROM users;
-SELECT * FROM BOOKING;
-
-
-# Mở file shell config
-nano ~/.bashrc
-
-# Thêm cuối file
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-export PATH=$JAVA_HOME/bin:$PATH
-
-# Áp dụng
-source ~/.bashrc
-
-# Kiểm tra
-java -version
-mvn -version
-
-jdbc:h2:mem:bookingdb
-SHOW TABLES;
-SELECT * FROM BOOKING;
-SELECT * FROM BOOKING ORDER BY ID DESC;
-SELECT COUNT(*) FROM BOOKING;
-
-jdbc:h2:mem:roomdb
-SHOW TABLES;
-
-jdbc:h2:mem:paymentdb
-SHOW TABLES;
-SELECT * FROM PAYMENT;
-SELECT * FROM PAYMENT WHERE BOOKING_ID = 1;
-SELECT COUNT(*) FROM PAYMENT;
-SELECT COUNT(*) FROM PAYMENT;
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` | `hotel` / `hotel123` | Tài khoản PostgreSQL |
+| `JWT_SECRET` | (chuỗi mẫu) | Khoá ký JWT, dùng chung auth-service và api-gateway |
+| `BOOKING_PAYMENT_TIMEOUT_MINUTES` | `15` | Booking chưa thanh toán sau bao lâu thì tự huỷ |
+| `BACKUP_INTERVAL_SECONDS` | `3600` | Chu kỳ sao lưu |
+| `BACKUP_KEEP` | `24` | Số bản sao lưu giữ lại |
