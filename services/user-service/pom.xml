@@ -55,6 +55,19 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- PostgreSQL (Chương 7: dữ liệu bền vững, sao lưu được) -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Chương 8: health check -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- Validation (optional nhưng nên có) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

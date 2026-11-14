@@ -1,4 +1,4 @@
-const API = "https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api";
+const API = API_BASE;
 
 function showLogin(){
   loginForm.style.display="block";

@@ -2,7 +2,7 @@ function login(){
   const email = document.getElementById("email").value;
   const password = document.getElementById("password").value;
 
-  fetch("https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/auth/login", {
+  fetch(API_BASE + "/auth/login", {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
     body: JSON.stringify({ email, password })
@@ -20,7 +20,7 @@ function login(){
 
     localStorage.setItem("token", data.token);
     localStorage.setItem("role", data.role);
-    localStorage.setItem("email", data.email);
+    localStorage.setItem("email", email);
 
     location.href = "admin.html";
   })

@@ -10,3 +10,9 @@ target/
 
 # OS
 .DS_Store
+
+# Bản sao lưu database (Chương 7)
+backups/
+
+# Biến môi trường cục bộ
+.env

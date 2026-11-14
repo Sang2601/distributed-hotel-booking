@@ -1,19 +1,32 @@
 server:
   port: 8088
 
+# Chương 5: dùng chung secret với auth-service để kiểm tra chữ ký JWT
+jwt:
+  secret: ${JWT_SECRET:hotel-booking-secret-key-1234567890-abcdef}
+
+# Địa chỉ các service. Chạy local dùng localhost, chạy Docker dùng tên service (Docker DNS)
+services:
+  auth-url: ${AUTH_SERVICE_URL:http://localhost:8080}
+  user-url: ${USER_SERVICE_URL:http://localhost:8081}
+  booking-url: ${BOOKING_SERVICE_URL:http://localhost:8082}
+  room-url: ${ROOM_SERVICE_URL:http://localhost:8083}
+  payment-url: ${PAYMENT_SERVICE_URL:http://localhost:8084}
+
 spring:
   application:
     name: api-gateway
 
   cloud:
     gateway:
-
       globalcors:
         add-to-simple-url-handler-mapping: true
         corsConfigurations:
           '[/**]':
-            allowedOrigins:
-              - https://ominous-trout-v67rqxvv9j4v2w7rr-5500.app.github.dev
+            allowedOriginPatterns:
+              - http://localhost:*
+              - http://127.0.0.1:*
+              - https://*.app.github.dev
             allowedMethods:
               - GET
               - POST
@@ -26,36 +39,42 @@ spring:
 
       routes:
         - id: auth-service
-          uri: http://localhost:8080
+          uri: ${services.auth-url}
           predicates:
             - Path=/api/auth/**
           filters:
             - StripPrefix=1
 
         - id: user-service
-          uri: http://localhost:8081
+          uri: ${services.user-url}
           predicates:
             - Path=/api/users/**
           filters:
             - StripPrefix=1
 
         - id: booking-service
-          uri: http://localhost:8082
+          uri: ${services.booking-url}
           predicates:
             - Path=/api/bookings/**
           filters:
             - StripPrefix=1
 
         - id: room-service
-          uri: http://localhost:8083
+          uri: ${services.room-url}
           predicates:
             - Path=/api/rooms/**
           filters:
             - StripPrefix=1
 
         - id: payment-service
-          uri: http://localhost:8084
+          uri: ${services.payment-url}
           predicates:
             - Path=/api/payments/**
           filters:
-             - StripPrefix=1
+            - StripPrefix=1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

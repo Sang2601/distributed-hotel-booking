@@ -8,7 +8,7 @@ if (!bookingId) {
 document.getElementById("bookingId").innerText = bookingId;
 
 function pay() {
-  fetch("https://ominous-trout-v67rqxvv9j4v2w7rr-8088.app.github.dev/api/payments", {
+  fetch(API_BASE + "/payments", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
